@@ -107,8 +107,8 @@ def read_config():
                     else:
                             print 'Error, you must specify a trakt.tv CLIENT_SECRET'
                             sys.exit(1)
-                    if config.has_option('TRAKT', 'OAUTH_TOKEN') and len(config.get('TRAKT','OAUTH_TOKEN')) != 0:
-                            _trakt['oauth_token'] = config.get('TRAKT','OAUTH_TOKEN')
+                    if config.has_option('TRAKT', 'OAUTH_TOKEN') and len(config.get('TRAKT', 'OAUTH_TOKEN')) != 0:
+                            _trakt['oauth_token'] = config.get('TRAKT', 'OAUTH_TOKEN')
                     else:
                             print 'Warning, authentification is required'
                     if config.has_option('TRAKT', 'BASEURL'):
@@ -192,6 +192,7 @@ def api_search(object, search_type='movie,show,episode'):
     else:
         return json.loads(r.text)
 
+
 # parse input file, collect original movie name and year
 def parse_input(input_file):
     movies = []
@@ -203,8 +204,9 @@ def parse_input(input_file):
         # row[0] - name RU
         # row[1] - original name EN
         # row[2] - year
+        # row[9] - user rating
         cells = row.find_all('td')
-        movies.append((cells[0].get_text(), cells[1].get_text(), cells[2].get_text()))
+        movies.append((cells[0].get_text(), cells[1].get_text(), cells[2].get_text(), cells[9].get_text()))
     return movies
 
 
@@ -216,33 +218,61 @@ if _trakt['oauth_token']:
 else:
     api_auth()
 # get movies list
-movies = parse_input(IN_FILE)
-for movie in movies:
-    search_result = api_search(movie)
+list_items = parse_input(IN_FILE)
+sync_values = {
+    'movies': [],
+    'shows': [],
+    'episodes': []
+}
+for list_item in list_items:
+    # search in Trakt DB
+    search_result = api_search(list_item)
     objects_found = len(search_result)
     if objects_found == 0:
-        print 'Not found - %s(%s)' % (movie[0], movie[2])
-
+        print 'Not found - %s(%s)' % (list_item[0], list_item[2])
     else:
-        print '%s(%s) - %d objects' % (movie[0], movie[2], len(search_result))
+        print '%s(%s) - %d objects' % (list_item[0], list_item[2], len(search_result))
+        if list_item[3] not in ['', 'zero']:
+            print 'Personal rating: ' + list_item[3]
         for i, item in enumerate(search_result):
-            if item['type'] == 'movie':
-                link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['movie']['ids']['trakt'], item['type'])
-                print '%d - [MOVIE] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['movie']['title'], item['movie']['year'], item['movie']['ids']['trakt'], link)
-            elif item['type'] == 'episode':
-                link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['episode']['ids']['trakt'], item['type'])
-                print '%d - [EPISODE] Title: %s, Trakt ID: %s, Show: %s, Year: %s, Link: %s' % (i+1, item['episode']['title'], item['episode']['ids']['trakt'], item['show']['title'], item['show']['year'], link)
-            elif item['type'] == 'show':
-                link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['show']['ids']['trakt'], item['type'])
-                print '%d - [SHOW] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['show']['title'], item['show']['year'], item['show']['ids']['trakt'], link)
-            else:
-                print 'Unknown type - %s' % item['type']
+            # if item['type'] == 'movie':
+            #     link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['movie']['ids']['trakt'], item['type'])
+            #     print '%d - [MOVIE] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['movie']['title'], item['movie']['year'], item['movie']['ids']['trakt'], link)
+            # elif item['type'] == 'episode':
+            #     link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['episode']['ids']['trakt'], item['type'])
+            #     print '%d - [EPISODE] Title: %s, Trakt ID: %s, Show: %s, Year: %s, Link: %s' % (i+1, item['episode']['title'], item['episode']['ids']['trakt'], item['show']['title'], item['show']['year'], link)
+            # elif item['type'] == 'show':
+            #     link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['show']['ids']['trakt'], item['type'])
+            #     print '%d - [SHOW] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['show']['title'], item['show']['year'], item['show']['ids']['trakt'], link)
+            # else:
+            #     print 'Unknown type - %s' % item['type']
+            curr_obj = item[item['type']]
+            if item['type'] == 'episode':
+                curr_obj['year'] = item['show']['year']
+            link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (curr_obj['ids']['trakt'], item['type'])
+            print '%d - [%s] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['type'], curr_obj['title'], curr_obj['year'], curr_obj['ids']['trakt'], link)
         if objects_found == 1:
             #TODO: add procedure
+            sync_values[item['type']+'s'].append(item)
             add_id = item[item['type']]['ids']['trakt']
             print 'Only one item found, adding to list. ID: %s' % add_id
         else:
-            print 'Choose ID to add'
-
+            print 'More than one item found.'
+            choice = -1
+            while choice not in range(objects_found):
+                try:
+                    raw_result = raw_input('Choose element number[1]:')
+                    if raw_result == '':
+                        choice = 0
+                    else:
+                        choice = int(raw_result) - 1
+                except ValueError:
+                    choice = -1
+                print choice
+            chosen_item = search_result[choice]
+            print chosen_item
 
     print '--------------------------'
+
+print 'Sync Values:'
+print sync_values
