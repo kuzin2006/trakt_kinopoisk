@@ -43,7 +43,7 @@ requests.packages.urllib3.disable_warnings()
 
 # settings
 IN_FILE = 'kinopoisk.ru-favourites.xls'
-
+work_dir = ''
 
 
 _trakt = {
@@ -166,6 +166,34 @@ def api_auth():
     print 'Save as "oauth_token" in file {0}: {1}'.format('config.ini', response["access_token"])
 
 
+# universal api request
+def api_request(url, request_type='get', post_data=None):
+    response = {
+        'result': False,
+        'HTTP': '',
+        'json': ''
+    }
+    if _proxy['proxy']:
+        if request_type == 'get':
+            r = requests.get(url, headers=_headers, proxies=_proxyDict, timeout=(10, 60))
+        else:
+            r = requests.post(url, data=post_data, headers=_headers, proxies=_proxyDict, timeout=(10, 60))
+    else:
+        if request_type == 'get':
+            r = requests.get(url, headers=_headers, timeout=(5, 60))
+        else:
+            r = requests.post(url, data=post_data, headers=_headers, timeout=(10, 60))
+
+    if r.status_code not in [200, 201, 204]:
+        response['result'] = False
+        response['HTTP'] = 'Error code: {0} [{1}]'.format(r.status_code, r.text)
+    else:
+        response['result'] = True
+        response['HTTP'] = 'Success: {0}'.format(r.status_code)
+        response['json'] = json.loads(r.text.encode('utf-8'))
+    return response
+
+
 # api text search
 # possible values: movie , show , episode , person , list
 def api_search(object, search_type='movie,show,episode'):
@@ -179,18 +207,27 @@ def api_search(object, search_type='movie,show,episode'):
     query = (object[1], object[0].encode('utf-8'))[object[1] == '']
 
     url = _trakt['baseurl'] + '/search/' + search_type + '?query={0}&fields={1}&years={2}'.format(query, 'title,translations', year_range(object[2]))
-    # print url
-    # if options.verbose:
-    #     print(url)
-    if _proxy['proxy']:
-        r = requests.get(url, headers=_headers, proxies=_proxyDict, timeout=(10, 60))
-    else:
-        r = requests.get(url, headers=_headers, timeout=(5, 60))
-    if r.status_code != 200:
-        print "Error Get ID lookup results: {0} [{1}]".format(r.status_code, r.text)
+    search_result = api_request(url)
+    if not search_result['result']:
+        print "Error Get ID lookup results: {0}".format(search_result['HTTP'])
         return None
     else:
-        return json.loads(r.text)
+        return search_result['json']
+
+
+# api add to list
+def api_add_items(target_list=None, destination='collection'):
+    # get username
+    url = _trakt['baseurl'] + '/users/settings'
+    r = api_request(url)
+    if not r['result']:
+        print 'Error: %s' % r['HTTP']
+        return None
+    else:
+        username = r['json']['user']['ids']['slug']
+        url = _trakt['baseurl'] + '/users/{0}/lists/{1}/items'.format(username, target_list)
+        print url
+        return r
 
 
 # parse input file, collect original movie name and year
@@ -210,6 +247,61 @@ def parse_input(input_file):
     return movies
 
 
+# create trakt POST data
+def get_items(list_items):
+    sync_values = {
+        'movies': [],
+        'shows': [],
+        'episodes': []
+    }
+    for list_item in list_items:
+        # search in Trakt DB
+        search_result = api_search(list_item)
+        objects_found = len(search_result)
+        if objects_found == 0:
+            print 'Not found - %s(%s)' % (list_item[0], list_item[2])
+        else:
+            print '%s(%s) - %d objects' % (list_item[0], list_item[2], len(search_result))
+            if list_item[3] not in ['', 'zero']:
+                print 'Personal rating: ' + list_item[3]
+                rating = list_item[3]
+            else:
+                rating = None
+            for i, item in enumerate(search_result):
+                    curr_obj = item[item['type']]
+                    if item['type'] == 'episode':
+                        curr_obj['year'] = item['show']['year']
+                    link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (curr_obj['ids']['trakt'], item['type'])
+                    print '%d - [%s] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['type'], curr_obj['title'], curr_obj['year'], curr_obj['ids']['trakt'], link)
+            if objects_found == 1:
+                chosen_item = search_result[0]
+                print 'Only one item found, adding to list.'
+            else:
+                print 'More than one item found.'
+                # now choose one to add
+                choice = -1
+                while choice not in range(objects_found):
+                    try:
+                        raw_result = raw_input('Choose element number[1]:')
+                        if raw_result == '':
+                            choice = 0
+                        else:
+                            choice = int(raw_result) - 1
+                    except ValueError:
+                        choice = -1
+                chosen_item = search_result[choice]
+
+            curr_obj = chosen_item[chosen_item['type']]
+            print 'Add - [%s] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (chosen_item['type'], curr_obj['title'], curr_obj['year'], curr_obj['ids']['trakt'], link)
+            if rating is not None:
+                curr_obj['rating'] = int(rating)
+                print 'Personal rating added: %s' % rating
+            sync_values[chosen_item['type']+'s'].append(curr_obj)
+        print '--------------------------'
+    return sync_values
+
+
+# main
 read_config()
 # Display oauth token if exist, otherwise authenticate to get one
 if _trakt['oauth_token']:
@@ -217,62 +309,35 @@ if _trakt['oauth_token']:
     _headers['trakt-api-key'] = _trakt['client_id']
 else:
     api_auth()
-# get movies list
-list_items = parse_input(IN_FILE)
-sync_values = {
-    'movies': [],
-    'shows': [],
-    'episodes': []
-}
-for list_item in list_items:
-    # search in Trakt DB
-    search_result = api_search(list_item)
-    objects_found = len(search_result)
-    if objects_found == 0:
-        print 'Not found - %s(%s)' % (list_item[0], list_item[2])
-    else:
-        print '%s(%s) - %d objects' % (list_item[0], list_item[2], len(search_result))
-        if list_item[3] not in ['', 'zero']:
-            print 'Personal rating: ' + list_item[3]
-        for i, item in enumerate(search_result):
-            # if item['type'] == 'movie':
-            #     link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['movie']['ids']['trakt'], item['type'])
-            #     print '%d - [MOVIE] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['movie']['title'], item['movie']['year'], item['movie']['ids']['trakt'], link)
-            # elif item['type'] == 'episode':
-            #     link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['episode']['ids']['trakt'], item['type'])
-            #     print '%d - [EPISODE] Title: %s, Trakt ID: %s, Show: %s, Year: %s, Link: %s' % (i+1, item['episode']['title'], item['episode']['ids']['trakt'], item['show']['title'], item['show']['year'], link)
-            # elif item['type'] == 'show':
-            #     link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (item['show']['ids']['trakt'], item['type'])
-            #     print '%d - [SHOW] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['show']['title'], item['show']['year'], item['show']['ids']['trakt'], link)
-            # else:
-            #     print 'Unknown type - %s' % item['type']
-            curr_obj = item[item['type']]
-            if item['type'] == 'episode':
-                curr_obj['year'] = item['show']['year']
-            link = 'https://trakt.tv/search/trakt/%s?id_type=%s' % (curr_obj['ids']['trakt'], item['type'])
-            print '%d - [%s] Title: %s, Year: %s, Trakt ID: %s, Link: %s' % (i+1, item['type'], curr_obj['title'], curr_obj['year'], curr_obj['ids']['trakt'], link)
-        if objects_found == 1:
-            #TODO: add procedure
-            sync_values[item['type']+'s'].append(item)
-            add_id = item[item['type']]['ids']['trakt']
-            print 'Only one item found, adding to list. ID: %s' % add_id
-        else:
-            print 'More than one item found.'
-            choice = -1
-            while choice not in range(objects_found):
-                try:
-                    raw_result = raw_input('Choose element number[1]:')
-                    if raw_result == '':
-                        choice = 0
-                    else:
-                        choice = int(raw_result) - 1
-                except ValueError:
-                    choice = -1
-                print choice
-            chosen_item = search_result[choice]
-            print chosen_item
+# get movies list from cache
+cache_file = os.path.join(work_dir, 'request.cache')
+if os.path.exists(cache_file):
+    try:
+        f = codecs.open(cache_file, encoding='utf-8')
+        string = f.readline()
+        print string
+        trakt_items = json.loads(string)
+        print trakt_items
+    except Exception as e:
+        print "Error reading cache file {0}".format(cache_file) + e.message
+        sys.exit(1)
+    finally:
+        f.close()
+else:
+    try:
+        kinopoisk_items = parse_input(IN_FILE)
+        trakt_items = get_items(kinopoisk_items)
+        f = codecs.open(cache_file, mode='wb', encoding='utf-8')
+        f.writelines(json.dumps(trakt_items).encode('utf-8'))
+    except:
+        print "Error writing cache file {0}".format(cache_file)
+        sys.exit(1)
+    finally:
+        f.close()
+# stats
+#print 'Items read: %d' % len(kinopoisk_items)
+#print 'Items found in Trakt: %d' % int(len(trakt_items['movies'])+len(trakt_items['shows'])+len(trakt_items['episodes']))
+#print 'Sync Values:'
+#print trakt_items
 
-    print '--------------------------'
-
-print 'Sync Values:'
-print sync_values
+print api_add_items(target_list='kinopoisk')
