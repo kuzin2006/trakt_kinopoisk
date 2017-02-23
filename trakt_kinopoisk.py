@@ -42,8 +42,9 @@ requests.packages.urllib3.disable_warnings()
 
 
 # settings
-IN_FILE = 'kinopoisk.ru-favourites.xls'
+IN_FILE = ''
 work_dir = ''
+list_to_update = ''
 
 
 _trakt = {
@@ -120,6 +121,19 @@ def read_config():
                             _proxy['port'] = config.get('SETTINGS', 'PROXY_PORT')
                             _proxyDict['http'] = _proxy['host']+':'+_proxy['port']
                             _proxyDict['https'] = _proxy['host']+':'+_proxy['port']
+                    if config.has_option('SETTINGS', 'IN_FILE'):
+                        global IN_FILE
+                        if config.get('SETTINGS', 'IN_FILE') != '':
+                            IN_FILE = os.path.join(work_dir, config.get('SETTINGS', 'IN_FILE'))
+                            if not os.path.exists(IN_FILE):
+                                print 'Input data file {0} not found, exiting'.format(IN_FILE)
+                                sys.exit(1)
+                        else:
+                            print 'Please copy input file to script dir, and set its name in config.ini as IN_FILE'
+                            sys.exit(1)
+                    if config.has_option('SETTINGS', 'LIST'):
+                        global list_to_update
+                        list_to_update = config.get('SETTINGS', 'LIST')
             except:
                     print "Error reading configuration file {0}".format(_configfile)
                     sys.exit(1)
@@ -136,6 +150,8 @@ def read_config():
                     config.set('SETTINGS', 'PROXY', False)
                     config.set('SETTINGS', 'PROXY_HOST', 'https://127.0.0.1')
                     config.set('SETTINGS', 'PROXY_PORT', '3128')
+                    config.set('SETTINGS', 'IN_FILE', '')
+                    config.set('SETTINGS', 'LIST', '')
                     with open(_configfile, 'wb') as configfile:
                             config.write(configfile)
                             print "Default settings wrote to file {0}".format(_configfile)
@@ -216,7 +232,7 @@ def api_search(object, search_type='movie,show,episode'):
 
 
 # api add to list
-def api_add_items(target_list=None, destination='collection'):
+def api_add_items(values, target_list=None):
     # get username
     url = _trakt['baseurl'] + '/users/settings'
     r = api_request(url)
@@ -225,8 +241,12 @@ def api_add_items(target_list=None, destination='collection'):
         return None
     else:
         username = r['json']['user']['ids']['slug']
-        url = _trakt['baseurl'] + '/users/{0}/lists/{1}/items'.format(username, target_list)
-        print url
+        # sync with watchlist or collection, otherwise add items to given list name
+        if target_list in ['collection', 'watchlist', 'history', 'ratings']:
+            url = _trakt['baseurl'] + '/sync/{0}'.format(target_list)
+        else:
+            url = _trakt['baseurl'] + '/users/{0}/lists/{1}/items'.format(username, target_list)
+        r = api_request(url, request_type='POST', post_data=values)
         return r
 
 
@@ -243,7 +263,7 @@ def parse_input(input_file):
         # row[2] - year
         # row[9] - user rating
         cells = row.find_all('td')
-        movies.append((cells[0].get_text(), cells[1].get_text(), cells[2].get_text(), cells[9].get_text()))
+        movies.append((cells[0].get_text(), cells[1].get_text(), cells[2].get_text()[:4], cells[9].get_text()))
     return movies
 
 
@@ -312,32 +332,83 @@ else:
 # get movies list from cache
 cache_file = os.path.join(work_dir, 'request.cache')
 if os.path.exists(cache_file):
+    cache_choice = raw_input('Cached request data found. Enter \'y\' to use it:')
+else:
+    cache_choice = 'n'
+
+if cache_choice == 'y':
+    print 'Read cached request data from {0}. Delete this file for new parse.'.format(cache_file)
     try:
         f = codecs.open(cache_file, encoding='utf-8')
         string = f.readline()
-        print string
-        trakt_items = json.loads(string)
-        print trakt_items
+        trakt_items = json.loads(string.encode('utf-8'))
+        # print trakt_items
     except Exception as e:
         print "Error reading cache file {0}".format(cache_file) + e.message
         sys.exit(1)
     finally:
         f.close()
 else:
+    print 'Cache not found or rejected, starting import from %s' % IN_FILE
     try:
         kinopoisk_items = parse_input(IN_FILE)
         trakt_items = get_items(kinopoisk_items)
+        print 'Items read: %d' % len(kinopoisk_items)
         f = codecs.open(cache_file, mode='wb', encoding='utf-8')
         f.writelines(json.dumps(trakt_items).encode('utf-8'))
-    except:
-        print "Error writing cache file {0}".format(cache_file)
+    except Exception as e:
+        print "Error writing cache file {0} - {1}".format(cache_file. e.message)
         sys.exit(1)
     finally:
         f.close()
 # stats
-#print 'Items read: %d' % len(kinopoisk_items)
-#print 'Items found in Trakt: %d' % int(len(trakt_items['movies'])+len(trakt_items['shows'])+len(trakt_items['episodes']))
-#print 'Sync Values:'
-#print trakt_items
+print 'Items found in Trakt: %d' % int(len(trakt_items['movies'])+len(trakt_items['shows'])+len(trakt_items['episodes']))
+# print 'Sync Values:'
+# print trakt_items
+print 'Trakt list for items: %s' % list_to_update
+continue_choice = raw_input('If all settings correct, enter \'y\' to send list to Trakt, or \'r\' to update ratings only:')
+template = '{:<10}{:<8}{:<7}{:<10}'
+if continue_choice == 'y':
+    # api request for sync
+    response = api_add_items(json.dumps(trakt_items), target_list=list_to_update)
+    if not response['result']:
+        print 'API list update error: %s' % response['HTTP']
+    else:
+        print 'API call success:\n---------------------------------'
+        print template.format('', 'Movies', 'Shows', 'Episodes')
+        print template.format('Added', response['json']['added']['movies'], '', response['json']['added']['episodes'])
+        if list_to_update != 'history':
+            print template.format('Existing', response['json']['existing']['movies'], '', response['json']['existing']['episodes'])
+    # update ratings
+    response = api_add_items(json.dumps(trakt_items), target_list='ratings')
+    if not response['result']:
+        print 'API ratings update error: %s' % response['HTTP']
+    else:
+        print 'API update ratings:'
+        template_items = []
+        for media_type in ['movies', 'shows', 'episodes']:
+            try:
+                template_items.append(response['json']['added'][media_type])
+            except:
+                template_items.append('')
+        print template.format('Rated', template_items[0], template_items[1], template_items[2])
+elif continue_choice == 'r':
+    # update ratings
+    response = api_add_items(json.dumps(trakt_items), target_list='ratings')
+    if not response['result']:
+        print 'API ratings update error: %s' % response['HTTP']
+    else:
+        print 'API call success:\n---------------------------------'
+        print template.format('', 'Movies', 'Shows', 'Episodes')
+        print 'API update ratings:'
+        template_items = []
+        for media_type in ['movies', 'shows', 'episodes']:
+            try:
+                template_items.append(response['json']['added'][media_type])
+            except:
+                template_items.append('')
+        print template.format('Rated', template_items[0], template_items[1], template_items[2])
+else:
+    print 'User cancelled, no data sent. Bye.'
+    sys.exit(0)
 
-print api_add_items(target_list='kinopoisk')
